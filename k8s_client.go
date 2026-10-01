@@ -43,7 +43,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	namespace := "sync-seat"
+	namespace := "kube-system" // Change this to the desired namespace
 	fmt.Printf("\nFetching Pods in namespace '%s'.....\n\n", namespace)
 
 	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
