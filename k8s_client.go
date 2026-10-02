@@ -26,7 +26,7 @@ func getKubeConfigPath() string {
 	return filepath.Join(home, ".kube", "config")
 }
 
-func main() {
+//func main() {
 	kubeconfig := getKubeConfigPath()
 	fmt.Printf("Loading kubeconfig from: %s\n", kubeconfig)
 

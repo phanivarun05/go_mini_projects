@@ -15,7 +15,14 @@ import (
 	//"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+
+	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/cli"
 )
+
+func DebugLog(format string, v ...interface{}) {
+	log.Printf("[HELM-DEBUG]"+format, v...)
+}
 
 func getKubeConfigPath() string {
 	if env := os.Getenv("KUBECONFIG"); env != "" {
@@ -26,6 +33,35 @@ func getKubeConfigPath() string {
 		log.Fatalf("Unable to find user home directory: %v", err)
 	}
 	return filepath.Join(home, ".kube", "config")
+}
+
+func ListReleases(actionConfig *action.Configuration, namespace, context string) {
+	fmt.Println("--- Listing Helm Releases ---")
+
+	listClient := action.NewList(actionConfig)
+	listClient.AllNamespaces = false
+	listClient.StateMask = action.ListDeployed | action.ListFailed
+
+	releases, err := listClient.Run()
+	if err != nil {
+		log.Fatalf("Error listing Helm releases: %v", err)
+	}
+
+	if len(releases) == 0 {
+		fmt.Printf("No Helm releases found in namespace '%s' of cluster '%s'.\n", namespace, context)
+		return
+	}
+
+	fmt.Printf("%-20s | %-12s | %-10s | %-15s\n", "NAME", "STATUS", "REVISION", "CHART")
+	fmt.Println("------------------------------------------------------------------")
+	for _, release := range releases {
+		fmt.Printf("%-20s | %-12s | %-10d | %-15s\n",
+			release.Name,
+			release.Info.Status.String(),
+			release.Version,
+			release.Chart.Name(),
+		)
+	}
 }
 
 func main() {
@@ -100,6 +136,22 @@ func main() {
 	if !nsExists {
 		log.Fatalf("Namespace '%s' not found in the cluster", targetNamespace)
 	}
+
+	envSettings := cli.New()
+	envSettings.KubeConfig = kubeconfig
+	envSettings.KubeContext = targetContext
+
+	actionConfig := new(action.Configuration)
+
+	driver := "secret"
+
+	if err := actionConfig.Init(envSettings.RESTClientGetter(), targetNamespace, driver, DebugLog); err != nil {
+		log.Fatalf("Error initializing Helm action configuration: %v", err)
+	}
+
+	ListReleases(actionConfig, targetNamespace, targetContext)
+
+	fmt.Printf("\nFetching pods from Namespace: %s in Cluster: %s\n", targetNamespace, targetContext)
 
 	pods, err := clientset.CoreV1().Pods(targetNamespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
