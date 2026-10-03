@@ -3,6 +3,7 @@ package main
 import (
 	//"context"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -17,7 +18,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
+	"helm.sh/helm/v3/pkg/storage/driver"
 )
 
 func DebugLog(format string, v ...interface{}) {
@@ -61,6 +64,53 @@ func ListReleases(actionConfig *action.Configuration, namespace, context string)
 			release.Version,
 			release.Chart.Name(),
 		)
+	}
+}
+
+func InstallOrUpgradeRelease(actionConfig *action.Configuration, releaseName, chartPath, namespace string, values map[string]interface{}) {
+	fmt.Printf("\n--- Deploying Release '%s' ---\n", releaseName)
+
+	chart, err := loader.Load(chartPath)
+	if err != nil {
+		log.Fatalf("Error loading chart from path '%s': %v", chartPath, err)
+	}
+
+	histClient := action.NewHistory(actionConfig)
+	histClient.Max = 1
+	_, err = histClient.Run(releaseName)
+
+	if errors.Is(err, driver.ErrReleaseNotFound) {
+		fmt.Printf("Release '%s' not found. Performing fresh INSTALL...\n", releaseName)
+
+		installClient := action.NewInstall(actionConfig)
+		installClient.ReleaseName = releaseName
+		installClient.Namespace = namespace
+		installClient.Timeout = 5 * time.Minute
+		installClient.Wait = false
+
+		rel, err := installClient.Run(chart, values)
+		if err != nil {
+			log.Fatalf("Error installing release '%s': %v", releaseName, err)
+		}
+		fmt.Printf("Successfully INSTALLED '%s' (Revision %d) | Status: %s\n",
+			rel.Name, rel.Version, rel.Info.Status)
+	} else if err == nil {
+		fmt.Printf("Release '%s' found. Performing UPGRADE...\n", releaseName)
+
+		upgradeClient := action.NewUpgrade(actionConfig)
+		upgradeClient.Namespace = namespace
+		upgradeClient.Timeout = 2 * time.Minute
+		upgradeClient.Wait = false
+
+		rel, err := upgradeClient.Run(releaseName, chart, values)
+		if err != nil {
+			log.Fatalf("Helm upgrade failed: %v", err)
+		}
+
+		fmt.Printf("Successfully UPGRADED '%s' to Revision %d | Status: %s\n",
+			rel.Name, rel.Version, rel.Info.Status)
+	} else {
+		log.Fatalf("Error checking release history for '%s': %v", releaseName, err)
 	}
 }
 
@@ -150,6 +200,30 @@ func main() {
 	}
 
 	ListReleases(actionConfig, targetNamespace, targetContext)
+
+	var chartPath, releaseName string
+	fmt.Print("\nEnter the Helm chart path (e.g., ./mychart or stable/mysql): ")
+	fmt.Scanln(&chartPath)
+
+	fmt.Print("Enter the release name for the Helm chart: ")
+	fmt.Scanln(&releaseName)
+
+	customValues := map[string]interface{}{
+		"replicaCount": 1, // Keep it light
+		"image": map[string]interface{}{
+			"repository": "nginx",
+			"tag":        "alpine",
+			"pullPolicy": "IfNotPresent",
+		},
+	}
+
+	if _, err := os.Stat(chartPath); err == nil {
+		InstallOrUpgradeRelease(actionConfig, releaseName, chartPath, targetNamespace, customValues)
+
+		ListReleases(actionConfig, targetNamespace, targetContext)
+	} else {
+		log.Fatalf("Chart path '%s' does not exist", chartPath)
+	}
 
 	fmt.Printf("\nFetching pods from Namespace: %s in Cluster: %s\n", targetNamespace, targetContext)
 
