@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	//"time"
@@ -158,7 +159,7 @@ func main() {
 		log.Fatalf("Error creating Kubernetes client: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
 	fmt.Printf("\nFetching available Namespaces from the Cluster: %s\n", targetContext)
@@ -209,7 +210,7 @@ func main() {
 	fmt.Scanln(&releaseName)
 
 	customValues := map[string]interface{}{
-		"replicaCount": 1, // Keep it light
+		"replicaCount": 3, // Keep it light
 		"image": map[string]interface{}{
 			"repository": "nginx",
 			"tag":        "alpine",
@@ -245,6 +246,96 @@ func main() {
 			pod.Name,
 			pod.Status.Phase,
 			totalRestarts)
+	}
+
+	// 8. Create maps to group Pods dynamically by their GitOps / Deployment owners
+	helmMap := make(map[string][]string)
+	argoMap := make(map[string][]string)
+	var independentPods []string
+
+	for _, pod := range pods.Items {
+		var mapped bool
+		podInfoStr := fmt.Sprintf("%s [Status: %s]", pod.Name, pod.Status.Phase)
+
+		// 1. Check for explicit ArgoCD Tracking ID on the resource (Annotation)
+		if trackingID, exists := pod.Annotations["argocd.argoproj.io/tracking-id"]; exists {
+			parts := strings.Split(trackingID, ":")
+			if len(parts) > 0 {
+				appName := parts[0] // Extract the actual app name string
+				argoMap[appName] = append(argoMap[appName], podInfoStr)
+				mapped = true
+			}
+		}
+
+		// 2. Check for ArgoCD custom instance tracking annotation
+		if !mapped {
+			if argoInstanceAnn, exists := pod.Annotations["argocd.argoproj.io/instance"]; exists {
+				argoMap[argoInstanceAnn] = append(argoMap[argoInstanceAnn], podInfoStr)
+				mapped = true
+			}
+		}
+
+		// 3. Fallback to Standard Label Tracking (Matches your exact pod metadata!)
+		if !mapped {
+			if instanceLabel, exists := pod.Labels["app.kubernetes.io/instance"]; exists {
+				// If a native Helm release name exists alongside it, classify it under Helm.
+				// Otherwise, since it came via GitOps manifest engine without Helm secrets, it belongs to Argo.
+				if helmRelease, isHelm := pod.Labels["meta.helm.sh/release-name"]; isHelm {
+					helmMap[helmRelease] = append(helmMap[helmRelease], podInfoStr)
+				} else {
+					argoMap[instanceLabel] = append(argoMap[instanceLabel], podInfoStr)
+				}
+				mapped = true
+			}
+		}
+
+		// 4. Fallback to direct Helm standalone labels
+		if !mapped {
+			if helmRelease, exists := pod.Labels["meta.helm.sh/release-name"]; exists {
+				helmMap[helmRelease] = append(helmMap[helmRelease], podInfoStr)
+				mapped = true
+			}
+		}
+
+		// 5. If everything else fails, it's truly unmanaged
+		if !mapped {
+			independentPods = append(independentPods, podInfoStr)
+		}
+	}
+
+	// 9. Print out the unified dashboard
+	fmt.Println("\n=========================================")
+	fmt.Printf(" DEPLOYMENT TRACKING IN NAMESPACE: %s\n", targetNamespace)
+	fmt.Println("=========================================")
+
+	// Print ArgoCD Applications
+	if len(argoMap) > 0 {
+		fmt.Println("\n🐙 ArgoCD Deployed Applications:")
+		for appName, podList := range argoMap {
+			fmt.Printf("   ├── 📱 App: %s (%d pods)\n", appName, len(podList))
+			for _, podInfo := range podList {
+				fmt.Printf("   │   └── 🟢 Pod: %s\n", podInfo)
+			}
+		}
+	}
+
+	// Print Standalone Helm Releases
+	if len(helmMap) > 0 {
+		fmt.Println("\n📦 Native Helm Releases:")
+		for release, podList := range helmMap {
+			fmt.Printf("   ├── 📦 Release: %s (%d pods)\n", release, len(podList))
+			for _, podInfo := range podList {
+				fmt.Printf("   │   └── 🟢 Pod: %s\n", podInfo)
+			}
+		}
+	}
+
+	// Print completely unmanaged pods (e.g. manual kubectl run debugging)
+	if len(independentPods) > 0 {
+		fmt.Printf("\n⚙️  Independent / Unmanaged Pods (%d pods)\n", len(independentPods))
+		for _, podInfo := range independentPods {
+			fmt.Printf("   └── 📄 Pod: %s\n", podInfo)
+		}
 	}
 
 }

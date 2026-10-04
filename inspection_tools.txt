@@ -1,0 +1,6 @@
+docker inspect -f '{{.Name}} - {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $(docker ps -aq --filter name=sync-seat-control-plane)
+cp ~/.kube/config ~/.kube/config-argocd
+export KUBECONFIG=~/.kube/config-argocd
+nano ~/.kube/config-argocd
+argocd cluster add kind-sync-seat --insecure --upsert
+unset KUBECONFIG
