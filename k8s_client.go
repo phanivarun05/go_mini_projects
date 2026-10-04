@@ -1,6 +1,6 @@
 package main
 
-import (
+/*import (
 	"context"
 	"fmt"
 	"log"
@@ -66,3 +66,4 @@ func getKubeConfigPath() string {
 			totalRestarts)
 	}
 }
+*/
