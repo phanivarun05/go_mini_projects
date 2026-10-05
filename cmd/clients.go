@@ -1,37 +1,89 @@
 package cmd
 
 import (
+	deploymentmap "go-mini-projects/internal/deployment-map"
+	"go-mini-projects/internal/helm"
 	"go-mini-projects/internal/k8s"
 
 	"github.com/spf13/cobra"
 )
 
-func runK8s(cmd *cobra.Command, args []string) {
-	k8s.K8sClient()
-}
+var (
+	flagContext   string
+	flagNamespace string
+)
 
-/*func runHelm(cmd *cobra.Command, args []string) {}
+var inspectCmd = &cobra.Command{
+	Use:   "inspect",
+	Short: "Inspect pods and group them by deployment lineage (ArgoCD / Helm / Standalone)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// 1. Resolve context (use flag if provided, else prompt interactively)
+		targetCtx, err := k8s.SelectContextOrPrompt(flagContext)
+		if err != nil {
+			return err
+		}
 
-func runDeploy(cmd *cobra.Command, args []string) {}
-*/
+		// 2. Initialize K8s client for resolved context
+		k8sClient, err := k8s.NewClient(targetCtx)
+		if err != nil {
+			return err
+		}
 
-var k8sCmd = &cobra.Command{
-	Use:   "K8s",
-	Short: "Interact with Kubernetes clusters",
-	Run:   runK8s,
-}
+		// 3. Resolve namespace (use flag if provided, else list and prompt)
+		targetNs, err := k8sClient.SelectNamespaceOrPrompt(flagNamespace)
+		if err != nil {
+			return err
+		}
 
-/*var helmcmd = &cobra.Command{
-	Use:   "Helm",
-	Short: "Manage Helm charts",
+		// 4. Run classification engine
+		return deploymentmap.InspectLineage(k8sClient, targetNs)
+	},
 }
 
 var deployCmd = &cobra.Command{
-	Use:   "Deploy",
-	Short: "Deploy an application to the Kubernetes cluster",
+	Use:   "deploy [RELEASE_NAME] [CHART_PATH]",
+	Short: "Install or upgrade a Helm chart",
+	Args:  cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		releaseName := args[0]
+		chartPath := args[1]
+
+		targetCtx, err := k8s.SelectContextOrPrompt(flagContext)
+		if err != nil {
+			return err
+		}
+
+		k8sClient, err := k8s.NewClient(targetCtx)
+		if err != nil {
+			return err
+		}
+
+		targetNs, err := k8sClient.SelectNamespaceOrPrompt(flagNamespace)
+		if err != nil {
+			return err
+		}
+
+		helmClient, err := helm.NewClient(targetCtx, targetNs)
+		if err != nil {
+			return err
+		}
+
+		values := map[string]interface{}{
+			"replicaCount": 2,
+			"image": map[string]interface{}{
+				"repository": "nginx",
+				"tag":        "alpine",
+			},
+		}
+
+		return helmClient.DeployOrUpgrade(releaseName, chartPath, values)
+	},
 }
-*/
 
 func init() {
-	rootCmd.AddCommand(k8sCmd)
+	rootCmd.PersistentFlags().StringVarP(&flagContext, "context", "c", "", "Target Kubernetes context/cluster")
+	rootCmd.PersistentFlags().StringVarP(&flagNamespace, "namespace", "n", "", "Target Kubernetes namespace")
+
+	rootCmd.AddCommand(inspectCmd)
+	rootCmd.AddCommand(deployCmd)
 }

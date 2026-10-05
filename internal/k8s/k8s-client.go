@@ -3,119 +3,104 @@ package k8s
 import (
 	"context"
 	"fmt"
-	"log"
-	"os"
-	"path/filepath"
 	"time"
+
+	"go-mini-projects/config"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-func getKubeConfigPath() string {
-	if env := os.Getenv("KUBECONFIG"); env != "" {
-		return env
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatalf("Unable to find user home directory: %v", err)
-	}
-	return filepath.Join(home, ".kube", "config")
+type Client struct {
+	Clientset *kubernetes.Clientset
+	Context   string
+	Namespace string
 }
 
-func K8sClient() {
-	kubeconfig := getKubeConfigPath()
-	fmt.Printf("Loading Kubeconfig from %s\n", kubeconfig)
-
-	rawConfig, err := clientcmd.LoadFromFile(kubeconfig)
-	if err != nil {
-		log.Fatalf("Error loading kubeconfig: %v", err)
-	}
-
-	fmt.Println("Available contexts (clusters):")
-	for contextName := range rawConfig.Contexts {
-		if contextName == rawConfig.CurrentContext {
-			fmt.Printf("* %s (current)\n", contextName)
-		} else {
-			fmt.Printf("  %s\n", contextName)
-		}
-	}
-
-	var targetContext, targetNamespace string
-
-	fmt.Print("\nEnter the context (cluster) you want to use: ")
-	fmt.Scanln(&targetContext)
-
-	if _, exists := rawConfig.Contexts[targetContext]; !exists {
-		log.Fatalf("Context '%s' not found in kubeconfig", targetContext)
-	}
-
+// NewClient initializes a Kubernetes clientset for a targeted context
+func NewClient(ctxName string) (*Client, error) {
+	kubeconfig := config.GetKubeConfigPath()
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	loadingRules.ExplicitPath = kubeconfig
 
 	configOverrides := &clientcmd.ConfigOverrides{
-		CurrentContext: targetContext,
+		CurrentContext: ctxName,
 	}
 
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides).ClientConfig()
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides).ClientConfig()
 	if err != nil {
-		log.Fatalf("Error creating client config: %v", err)
+		return nil, err
 	}
 
-	clientset, err := kubernetes.NewForConfig(config)
+	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		log.Fatalf("Error creating Kubernetes client: %v", err)
+		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	return &Client{
+		Clientset: cs,
+		Context:   ctxName,
+	}, nil
+}
+
+// SelectContextOrPrompt checks if targetContext is set; if empty, lists contexts and prompts user
+func SelectContextOrPrompt(targetContext string) (string, error) {
+	if targetContext != "" {
+		return targetContext, nil
+	}
+
+	rawCfg, err := config.LoadRawKubeConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to load kubeconfig: %w", err)
+	}
+
+	fmt.Println("\nAvailable Contexts (Clusters):")
+	var contexts []string
+	for ctxName := range rawCfg.Contexts {
+		contexts = append(contexts, ctxName)
+		if ctxName == rawCfg.CurrentContext {
+			fmt.Printf(" * %s (current default)\n", ctxName)
+		} else {
+			fmt.Printf("   %s\n", ctxName)
+		}
+	}
+
+	var selected string
+	fmt.Print("\nEnter target context [Press Enter for default]: ")
+	fmt.Scanln(&selected)
+
+	if selected == "" {
+		return rawCfg.CurrentContext, nil
+	}
+	return selected, nil
+}
+
+// SelectNamespaceOrPrompt checks if targetNamespace is set; if empty, lists namespaces and prompts user
+func (c *Client) SelectNamespaceOrPrompt(targetNamespace string) (string, error) {
+	if targetNamespace != "" {
+		return targetNamespace, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	fmt.Printf("\nFetching available Namespaces from the Cluster: %s\n", targetContext)
-	nsList, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	nsList, err := c.Clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		log.Fatalf("Error fetching namespaces: %v", err)
+		return "", fmt.Errorf("failed to list namespaces: %w", err)
 	}
 
-	fmt.Printf("\nAvailable Namespaces:\n")
+	fmt.Printf("\nAvailable Namespaces in '%s':\n", c.Context)
 	for _, ns := range nsList.Items {
 		fmt.Printf(" - %s\n", ns.Name)
 	}
 
-	fmt.Print("\nEnter the namespace you want to use (default is 'default'): ")
-	fmt.Scanln(&targetNamespace)
+	var selected string
+	fmt.Print("\nEnter target namespace [default: 'default']: ")
+	fmt.Scanln(&selected)
 
-	nsExists := false
-	for _, ns := range nsList.Items {
-		if ns.Name == targetNamespace {
-			nsExists = true
-			break
-		}
+	if selected == "" {
+		return "default", nil
 	}
-
-	if !nsExists {
-		log.Fatalf("Namespace '%s' not found in the cluster", targetNamespace)
-	}
-
-	fmt.Printf("\nFetching pods from Namespace: %s in Cluster: %s\n", targetNamespace, targetContext)
-
-	pods, err := clientset.CoreV1().Pods(targetNamespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		log.Fatalf("Error fetching pods: %v", err)
-	}
-
-	fmt.Printf("%-45s | %-12s | %-10s\n", "POD NAME", "PHASE", "RESTARTS")
-	fmt.Println("-----------------------------------------------------------------------------")
-
-	for _, pod := range pods.Items {
-		totalRestarts := int32(0)
-		for _, containerStatus := range pod.Status.ContainerStatuses {
-			totalRestarts += containerStatus.RestartCount
-		}
-
-		fmt.Printf("%-45s | %-12s | %-10d\n",
-			pod.Name,
-			pod.Status.Phase,
-			totalRestarts)
-	}
+	return selected, nil
 }
